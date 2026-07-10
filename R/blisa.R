@@ -16,6 +16,25 @@
 #' @param ... Additional arguments passed to the relevant method.
 #'
 #' @return A list; see individual method documentation for details.
+#' @examples
+#' \dontrun{
+#' # Download and cache the example Xenium breast cancer dataset (~21 MB)
+#' data_url  <- paste0(
+#'   "https://github.com/ChenLaboratory/example_data/releases/",
+#'   "download/v1.0.0/spe_xenium_bc_s1rep1.rds"
+#' )
+#' cache_dir <- tools::R_user_dir("blisa", "cache")
+#' data_file <- file.path(cache_dir, "spe_xenium_bc_s1rep1.rds")
+#' if (!file.exists(data_file)) {
+#'   dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
+#'   download.file(data_url, data_file, mode = "wb")
+#' }
+#' spe <- readRDS(data_file)
+#'
+#' # blisa.SpatialExperiment method: bins cells, runs LISA, scores CCI
+#' result <- blisa(spe, bin_size = 50, group = "cell_type")
+#' result
+#' }
 #' @export
 blisa <- function(x, ...) UseMethod("blisa")
 
@@ -65,15 +84,27 @@ blisa <- function(x, ...) UseMethod("blisa")
 #'   when \code{group} is supplied. When provided, \code{\link{runCCI}} is
 #'   called automatically after the BLISA loop and its output is included in
 #'   the result as \code{CCI_scores}. Default \code{NULL}.
+#' @param fast Logical. When \code{TRUE} (default), uses
+#'   \code{fastLISA::local_moran_bv} (a fast C/OpenMP backend) for the
+#'   bivariate local Moran's I computation. When \code{FALSE}, uses the
+#'   original \code{spdep::localmoran_bv} + \code{spdep::hotspot} pipeline.
+#' @param cpu_threads Integer. Number of OpenMP threads used by
+#'   \code{fastLISA::local_moran_bv}. Only used when \code{fast = TRUE}.
+#'   Ignored on platforms without OpenMP. Default \code{4L}.
+#' @param verbose Logical. If \code{TRUE}, print progress messages (per-LR-pair
+#'   progress, bin filtering, CCI status). Default \code{FALSE} (silent).
+#'   A progress bar over the ligand-receptor pairs is shown automatically in
+#'   interactive sessions (and includes the current LR pair label when
+#'   \code{verbose = TRUE}).
 #'
 #' @return An object of class \code{blisa} with four components:
 #' \describe{
 #'   \item{LR_results}{Data frame of BLISA results for each LR pair, including
 #'     \code{ccc_mode}, \code{sig_numbers}, \code{sig_index}, \code{sig_pval},
 #'     \code{all_pval}, \code{all_lisa}, \code{all_quadrant}, and original
-#'     columns from \code{LR_df}. \code{all_quadrant} is a character vector
-#'     of \code{spdep::hotspot} quadrant labels (\code{"High-High"},
-#'     \code{"Low-Low"}, etc.) for every bin; non-tested bins are \code{NA}.}
+#'     columns from \code{LR_df}. \code{all_quadrant} is a character vector of
+#'     hotspot quadrant labels (\code{"High-High"}, \code{"Low-Low"}, etc.)
+#'     for every bin; non-tested bins are \code{NA}.}
 #'   \item{bins}{Bin-level \code{sf} object of hexagonal polygons.}
 #'   \item{spatial_weights}{Spatial weights list from \code{\link{computeSpatialWeights}}.}
 #'   \item{CCI_scores}{\code{NULL} unless \code{counts_by_group} is supplied,
@@ -100,9 +131,17 @@ blisa.default <- function(
     species           = c("human", "mouse"),
     genes             = NULL,
     counts_by_group   = NULL,
+    fast              = TRUE,
+    cpu_threads       = 4L,
+    verbose           = FALSE,
     ...
 ) {
-  sw             <- computeSpatialWeights(bins, bin_size, dmax, min_cells, n_cells_col)
+  msg   <- function(...) if (verbose) message(...)
+  quiet <- function(expr)
+    if (verbose) expr else suppressWarnings(suppressMessages(expr))
+
+  sw             <- quiet(computeSpatialWeights(bins, bin_size, dmax, min_cells,
+                                                n_cells_col))
   queen_wt       <- sw$queen_wt
   dist_wt        <- sw$dist_wt
   keep_idx_queen <- sw$keep_idx_queen
@@ -119,7 +158,15 @@ blisa.default <- function(
     species      = species
   )
 
-  LR_results <- LR_df_add_mode(LR_df_filtered, annotation_col, default_mode, diffuse_category)
+  LR_results <- quiet(LR_df_add_mode(LR_df_filtered, annotation_col,
+                                     default_mode, diffuse_category))
+
+  # Replace the CellChatDB interaction_name row names with informative IDs that
+  # spell out ligand/receptor subunits (e.g. "TGFB1_TGFBR2|TGFBR1"). The original
+  # name is preserved in a column for cross-referencing.
+  LR_results$interaction_name <- rownames(LR_results)
+  rownames(LR_results)        <- make_lr_id(LR_results$ligand.symbol,
+                                            LR_results$receptor.symbol)
 
   LR_results$sig_numbers   <- integer(nrow(LR_results))
   LR_results$sig_index     <- vector("list", nrow(LR_results))
@@ -128,9 +175,11 @@ blisa.default <- function(
   LR_results$all_lisa      <- vector("list", nrow(LR_results))
   LR_results$all_quadrant  <- vector("list", nrow(LR_results))
 
-  for (i in seq_len(nrow(LR_results))) {
-    message(rownames(LR_results)[i])
+  n_pairs <- nrow(LR_results)
+  show_pb <- interactive() && n_pairs > 0
+  if (verbose || show_pb) message("Testing ", n_pairs, " LR pairs...")
 
+  for (i in seq_len(n_pairs)) {
     ligand   <- LR_results$ligand.symbol[i]
     receptor <- LR_results$receptor.symbol[i]
     mode     <- LR_results$ccc_mode[i]
@@ -142,25 +191,63 @@ blisa.default <- function(
       wt       <- dist_wt
       keep_idx <- keep_idx_dist
     }
-    message("ccc mode is ", mode)
+
+    if (show_pb) {
+      # Under knitr, carriage-return updates are each captured as separate
+      # lines, so only the final (100%) line is drawn there; in an interactive
+      # console the bar updates in place every iteration.
+      in_knit <- isTRUE(getOption("knitr.in.progress"))
+      if (!in_knit || i == n_pairs) {
+        frac   <- i / n_pairs
+        width  <- 40L
+        filled <- round(frac * width)
+        lab    <- if (verbose)
+          sprintf("%-42s", paste0(rownames(LR_results)[i], " (", mode, ")")) else ""
+        bar <- sprintf("  %s|%s%s| %3.0f%%",
+                       lab, strrep("=", filled), strrep(" ", width - filled),
+                       frac * 100)
+        if (in_knit) {
+          cat(bar, "\n", sep = "")
+        } else {
+          cat("\r", bar, sep = "")
+          utils::flush.console()
+          if (i == n_pairs) cat("\n")
+        }
+      }
+    } else {
+      msg(rownames(LR_results)[i])
+      msg("ccc mode is ", mode)
+    }
 
     x_full <- get_min_expr(receptor, x)
     y_full <- get_min_expr(ligand, x)
 
-    res_bv <- spdep::localmoran_bv(x_full[keep_idx], y_full[keep_idx], wt, nsim = nsim)
+    if (fast) {
+      # fastLISA backend: C/OpenMP
+      res_bv <- fastLISA::local_moran_bv(
+        x_full[keep_idx], y_full[keep_idx], wt,
+        nsim    = nsim,
+        p.value = p_cutoff,
+        n.cores = cpu_threads
+      )
+      hs <- attr(res_bv, "cluster")
+    } else {
+      # spdep backend (original implementation)
+      res_bv <- spdep::localmoran_bv(x_full[keep_idx], y_full[keep_idx], wt,
+                                     nsim = nsim)
+      hs <- spdep::hotspot(
+        res_bv,
+        Prname        = "Pr(folded) Sim",
+        cutoff        = p_cutoff,
+        quadrant.type = "pysal",
+        p.adjust      = "none"
+      )
+    }
 
     full_pval <- rep(1, ncol(x))
     full_lisa <- rep(0, ncol(x))
     full_pval[keep_idx] <- res_bv[, "Pr(folded) Sim"]
     full_lisa[keep_idx] <- res_bv[, "Ibvi"]
-
-    hs <- spdep::hotspot(
-      res_bv,
-      Prname        = "Pr(folded) Sim",
-      cutoff        = p_cutoff,
-      quadrant.type = "pysal",
-      p.adjust      = "none"
-    )
 
     hs_idx_hh <- !is.na(hs) & hs == "High-High"
     HH_idx    <- keep_idx[which(hs_idx_hh)]
@@ -184,7 +271,7 @@ blisa.default <- function(
 
   CCI_scores <- NULL
   if (!is.null(counts_by_group)) {
-    message("Running CCI analysis...")
+    msg("Running CCI analysis...")
     tmp <- new_blisa(LR_results, bins, sw)
     CCI_scores <- runCCI.default(tmp, counts_by_group)
   }
@@ -208,11 +295,19 @@ blisa.default <- function(
 #' @param genes Character vector of gene names to consider when matching
 #'   ligand-receptor pairs. Defaults to \code{rownames(x)} (all genes in the
 #'   \code{SpatialExperiment} object).
+#' @param min_cells Integer. Bins with fewer cells are dropped during binning
+#'   by \code{\link{hexBinCells}}. Default \code{1}.
+#' @param min_total_counts Numeric. Bins whose total counts (summed over all
+#'   genes) fall below this threshold are dropped during binning by
+#'   \code{\link{hexBinCells}}. Set to \code{0} to disable. Default \code{10}.
+#' @param verbose Logical. If \code{TRUE}, print progress messages. Default
+#'   \code{FALSE} (silent).
 #'
 #' @export
 blisa.SpatialExperiment <- function(x, bin_size = 50, LR_df = NULL,
-                                       group = "cell_type",
-                                       genes = NULL, ...) {
+                                       group = "cell_type", genes = NULL,
+                                       min_cells = 1, min_total_counts = 10,
+                                       verbose = FALSE, ...) {
   coords <- as.data.frame(SpatialExperiment::spatialCoords(x))
 
   # Resolve group vector from colData
@@ -220,14 +315,17 @@ blisa.SpatialExperiment <- function(x, bin_size = 50, LR_df = NULL,
   if (!is.null(group) && group %in% cd_cols) {
     group_vec <- SummarizedExperiment::colData(x)[[group]]
   } else {
-    if (!is.null(group))
+    if (!is.null(group) && verbose)
       message("Column '", group, "' not found in colData(x) \u2014 CCI analysis will be skipped.")
     group_vec <- NULL
   }
 
   if (is.null(genes)) genes <- rownames(x)
 
-  binned <- hexBinCells(coords, SummarizedExperiment::assay(x, "counts"), bin_size = bin_size, group = group_vec)
+  binned <- hexBinCells(coords, SummarizedExperiment::assay(x, "counts"),
+                        bin_size = bin_size, min_cells = min_cells,
+                        min_total_counts = min_total_counts, group = group_vec,
+                        verbose = verbose)
 
   blisa.default(
     x               = binned$counts_matrix,
@@ -237,6 +335,7 @@ blisa.SpatialExperiment <- function(x, bin_size = 50, LR_df = NULL,
     n_cells_col     = "n_cells",
     genes           = genes,
     counts_by_group = binned$counts_by_group,
+    verbose         = verbose,
     ...
   )
 }

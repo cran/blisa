@@ -25,6 +25,17 @@
 #' @return A \code{ggplot} object.
 #' @seealso \code{\link{plotHotspots}} for a significance-based spatial map of
 #'   hotspot bins.
+#' @examples
+#' \dontrun{
+#' # Continuing from the blisa() example:
+#' # result <- blisa(spe, bin_size = 50, group = "cell_type")
+#' binned <- hexBinCells(
+#'   as.data.frame(SpatialExperiment::spatialCoords(spe)),
+#'   SummarizedExperiment::assay(spe, "counts"),
+#'   bin_size = 50, group = spe$cell_type
+#' )
+#' plotCCIspatial(result, binned$counts_by_group, index = 1)
+#' }
 #' @export
 plotCCIspatial <- function(x, counts_by_group, index = 1, ligand = NULL,
                             receptor = NULL, top_pairs = 30) {
@@ -47,18 +58,22 @@ plotCCIspatial <- function(x, counts_by_group, index = 1, ligand = NULL,
 
   nb_list <- if (mode == "nearby") sw$queen_nb_full else sw$dist_nb_full
 
+  # Collapse each cell type's count matrix to a single per-bin expression vector
+  # ONCE (get_min_expr takes the per-bin minimum across multi-subunit complexes).
+  # Doing this outside the hotspot loop avoids recomputing the full-width vector
+  # for every hotspot bin.
+  r_expr <- lapply(counts_by_group, function(m) get_min_expr(gene_r, m))
+  l_expr <- lapply(counts_by_group, function(m) get_min_expr(gene_l, m))
+
   # For each hotspot bin, score all sender-receiver cell-type combinations
   # and retain the dominant (highest-scoring) pair
   dominant_pairs <- do.call(rbind, lapply(sigHH, function(h) {
     nb_h <- unique(c(h, nb_list[[h]]))
 
     # Receptor expression in bin h per cell type (receivers)
-    r_scores <- sapply(ct_names, function(ct)
-      sum(counts_by_group[[ct]][gene_r, h]))
-
+    r_scores <- vapply(ct_names, function(ct) sum(r_expr[[ct]][h]),    numeric(1))
     # Ligand expression in neighbourhood of h per cell type (senders)
-    l_scores <- sapply(ct_names, function(ct)
-      sum(counts_by_group[[ct]][gene_l, nb_h]))
+    l_scores <- vapply(ct_names, function(ct) sum(l_expr[[ct]][nb_h]), numeric(1))
 
     score_mat <- 0.5 * log2(outer(r_scores, l_scores) + 1)
     best      <- which(score_mat == max(score_mat), arr.ind = TRUE)[1L, ]
@@ -82,9 +97,12 @@ plotCCIspatial <- function(x, counts_by_group, index = 1, ligand = NULL,
   dominant_pairs$cell_pair_plot <- ifelse(dominant_pairs$cell_pair %in% shown_pairs,
                                      dominant_pairs$cell_pair, "rare pairs")
 
-  # Label every bin: Empty / Non-Significant / dominant interacting pair
-  bins$cell_pair_plot                   <- ifelse(bins$n_cells > 0,
-                                                   "Non-Significant", "Empty")
+  # Label every bin: Empty / Non-Significant / dominant interacting pair.
+  # Bins not included in this LR pair's LISA test (empty, isolated, low-cell,
+  # or low total counts) are treated the same as empty bins.
+  tested <- !is.na(LR_results$all_quadrant[[index]])
+  bins$cell_pair_plot                        <- ifelse(tested,
+                                                       "Non-Significant", "Empty")
   bins$cell_pair_plot[dominant_pairs$hex_id] <- dominant_pairs$cell_pair_plot
   legend_levels       <- c(shown_pairs, "rare pairs", "Non-Significant", "Empty")
   bins$cell_pair_plot <- factor(bins$cell_pair_plot, levels = legend_levels)
@@ -93,7 +111,7 @@ plotCCIspatial <- function(x, counts_by_group, index = 1, ligand = NULL,
     setNames(cols[seq_along(shown_pairs)], shown_pairs),
     "rare pairs"      = "#404040",
     "Non-Significant" = "#D3D3D3",
-    "Empty"           = "#F5F5F5"
+    "Empty"           = "#FFFFFF"
   )
 
   p <- ggplot(bins) +

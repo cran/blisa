@@ -4,7 +4,7 @@ if (getRversion() >= "2.15.1") {
     # ggplot2 aes (plotCCIspatial)
     "cell_pair_plot",
     # ggplot2 aes (plotHotspots)
-    "fill_col", "val", "y",
+    "fill_col", "val", "x", "y",
     # ggplot2 aes (plotLRrank)
     "LR_pair", "sig_numbers", "annotation"
   ))
@@ -59,6 +59,24 @@ parse_units <- function(s) {
   s <- as.character(s)
   s <- gsub("\\s+", "", s)
   unlist(strsplit(s, "[,_]"))
+}
+
+# Normalise a (possibly multi-subunit) symbol string to a sorted set of genes,
+# so matching is independent of subunit order, separator (",", "_", "|"), and
+# surrounding whitespace. Used by .resolve_lr_index() for ligand/receptor lookup.
+.norm_units <- function(s) {
+  u <- trimws(unlist(strsplit(as.character(s), "[,_|]")))
+  sort(u[u != ""])
+}
+
+# Build an informative, unique LR identifier from the (comma-separated) ligand
+# and receptor symbol columns. Subunits are joined with "|" within each side and
+# the two sides with "_", e.g. "TGFB1_TGFBR2|TGFBR1". make.unique() disambiguates
+# pairs that collapse to the same symbol set (e.g. same genes, different pathway).
+make_lr_id <- function(ligand, receptor) {
+  fmt <- function(s) vapply(strsplit(as.character(s), ", "),
+                            paste, character(1), collapse = "|")
+  make.unique(paste(fmt(ligand), fmt(receptor), sep = "_"), sep = ".")
 }
 
 get_min_expr <- function(gene_str, hex_gene_counts) {

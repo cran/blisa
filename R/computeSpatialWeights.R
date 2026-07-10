@@ -27,6 +27,20 @@
 #'   \item{queen_nb_full}{Full (unsubset) neighbour list for nearby mode, indexed over all bins.}
 #'   \item{dist_nb_full}{Full (unsubset) neighbour list for diffuse mode, indexed over all bins.}
 #' }
+#' @examples
+#' \dontrun{
+#' set.seed(42)
+#' pts  <- sf::st_as_sf(
+#'   data.frame(x = runif(300, 0, 1000), y = runif(300, 0, 1000)),
+#'   coords = c("x", "y"), crs = NA
+#' )
+#' bins <- sf::st_sf(
+#'   geometry = sf::st_make_grid(pts, cellsize = 100,
+#'                               what = "polygons", square = FALSE)
+#' )
+#' sw <- computeSpatialWeights(bins, bin_size = 100, dmax = 300)
+#' names(sw)
+#' }
 #' @export
 computeSpatialWeights <- function(bins,
                                   bin_size    = 50,
@@ -98,7 +112,7 @@ computeSpatialWeights <- function(bins,
   dist_nb       <- r$nb;  keep_idx_dist <- r$keep_idx
 
   weight_at_dmax <- 0.01
-  dist_wt <- spdep::nb2listwdist(dist_nb, bins[keep_idx_dist, ],
+  dist_wt <- spdep::nb2listwdist(dist_nb, centroids[keep_idx_dist, ],
                                  type = "exp", style = "W", zero.policy = TRUE,
                                  alpha = -log(weight_at_dmax) / dmax)
 

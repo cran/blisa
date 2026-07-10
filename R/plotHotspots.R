@@ -1,9 +1,16 @@
 # Internal helper: resolve a row index from optional ligand/receptor args.
 # Returns `index` unchanged when neither ligand nor receptor is supplied.
+# Multi-subunit complexes match on the full subunit set, regardless of the
+# order/separator the user supplies (e.g. "TGFBR2,TGFBR1", "TGFBR1_TGFBR2",
+# and "TGFBR1|TGFBR2" all match a stored "TGFBR2, TGFBR1").
 .resolve_lr_index <- function(LR_results, index, ligand, receptor) {
   if (!is.null(ligand) && !is.null(receptor)) {
-    matches <- which(LR_results$ligand.symbol == ligand &
-                       LR_results$receptor.symbol == receptor)
+    want_l <- .norm_units(ligand)
+    want_r <- .norm_units(receptor)
+    same <- function(col, want)
+      vapply(col, function(s) identical(.norm_units(s), want), logical(1))
+    matches <- which(same(LR_results$ligand.symbol, want_l) &
+                       same(LR_results$receptor.symbol, want_r))
     if (length(matches) == 0)
       stop("No LR pair found with ligand = '", ligand,
            "' and receptor = '", receptor, "'.")
@@ -28,6 +35,13 @@
 #' @param ... Additional arguments passed to the method.
 #'
 #' @return A \code{ggplot} object.
+#' @examples
+#' \dontrun{
+#' # Continuing from the blisa() example:
+#' # result <- blisa(spe, bin_size = 50, group = "cell_type")
+#' plotHotspots(result, index = 1)
+#' plotHotspots(result, index = 1, log_pval = FALSE)
+#' }
 #' @export
 plotHotspots <- function(x, ...) UseMethod("plotHotspots")
 
@@ -89,9 +103,12 @@ plotHotspots.blisa <- function(x, index = 1, ligand = NULL, receptor = NULL,
     lgd_title <- "1-pval"
   }
 
-  # Pre-compute a fill colour for every bin
-  fill_cols <- rep("#F0F0F0", nrow(bins))    # empty
-  fill_cols[bins$n_cells > 0] <- "#D3D3D3"  # non-significant
+  # Pre-compute a fill colour for every bin. Bins not included in this LR
+  # pair's LISA test (empty, isolated, low-cell, or low total counts) are
+  # treated the same as empty bins; only tested bins can be "non-significant".
+  tested    <- !is.na(LR_results$all_quadrant[[index]])
+  fill_cols <- rep("#FFFFFF", nrow(bins))    # empty / excluded from testing (white)
+  fill_cols[tested] <- "#D3D3D3"             # tested but non-significant (light grey)
 
   if (length(sig_indices) > 0) {
     pval_range <- range(plot_vals)
@@ -124,7 +141,7 @@ plotHotspots.blisa <- function(x, index = 1, ligand = NULL, receptor = NULL,
     guides(color = guide_colorbar(title.position = "top")) +
     labs(
       title    = paste0(interaction, " - ", sig_num, " hotspots", title_suffix),
-      subtitle = "Grey scale: Light (Empty bins) | Medium (Non-sig bins)"
+      subtitle = "White: Empty/untested bins | Light grey: Non-significant bins"
     ) +
     theme_void() +
     theme(legend.position = "right")
