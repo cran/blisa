@@ -1,3 +1,26 @@
+# blisa 1.0.3
+
+* New argument `weighted` in `plotCCIspatial()`. The ligand contribution of each 
+  sender cell type at a hotspot is now the spatially weighted sum over its neighbours.
+* New argument `weighted` in `runCCI()`. The global ligand count of each 
+  sender group is now the sum over hotspots of the local weighted ligand counts 
+  used by `plotCCIspatial()`.
+
+# blisa 1.0.2
+
+* Added functionality for visium data
+* New function `blisaPathway()` for summarizing blisa results at the pathway level
+* Added a new element `level` to the `blisa` object class, specifying whether 
+  the results are lr level or pathway level
+* `plotLRrank()` and `plotHotspots()` not works for pathway level results
+
+# blisa 1.0.1
+
+* New argument `platform` in blisa to handle xenium and visium
+* New argument `as_points` in `plotHotspots()` to plot dots instead of hexagons
+* New argument `size` in `plotHotspots()` to change the size of the dots
+* New argument `background` in `plotHotspots()` to add background image (e.g., H&E)
+
 # blisa 1.0.0
 
 * `blisa()` now uses the `fastLISA` C/OpenMP backend by default (`fast = TRUE`)

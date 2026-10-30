@@ -12,8 +12,14 @@ plotHotspots(x, ...)
   index = 1,
   ligand = NULL,
   receptor = NULL,
+  as_points = FALSE,
+  size = 1.5,
+  background = NULL,
   log_pval = TRUE,
   p_cutoff = NULL,
+  spots = NULL,
+  spot_pval = NULL,
+  title = NULL,
   ...
 )
 }
@@ -34,6 +40,20 @@ and \code{index} is ignored. Must be supplied together with
 \item{receptor}{Character. Receptor gene symbol. Must be supplied together
 with \code{ligand}.}
 
+\item{as_points}{Logical. If \code{TRUE}, draw each bin as a dot at its
+centroid instead of its polygon. Useful for Visium, where each bin is a
+single spot. Default \code{FALSE} (draw polygons).}
+
+\item{size}{Numeric. Point size when \code{as_points = TRUE} (or when
+\code{background} is supplied). Default \code{1.5}.}
+
+\item{background}{A \code{ggplot} object to draw the hotspots on top of, e.g.
+\code{scider::plotImage(spe)} to place the H&E image behind the spots.
+When supplied, the hotspots are always rendered as dots (the raster
+background is incompatible with \code{geom_sf} coordinates), and the bins
+must share the background plot's coordinate frame (true for objects read by
+\code{scider::readVisium()}). Default \code{NULL}.}
+
 \item{log_pval}{Logical. If \code{TRUE} (default), colour significant bins
 by -log10(p-value). If \code{FALSE}, use 1 - p-value.}
 
@@ -45,6 +65,19 @@ bins are re-defined on the fly as those with \code{all_pval <= p_cutoff}
 and quadrant label \code{"High-High"} (from the stored
 \code{all_quadrant}), giving an exact re-threshold consistent with the
 original classification.}
+
+\item{spots}{Integer vector or \code{NULL}. Significant spot indices to plot
+directly, bypassing the LR-pair lookup -- e.g. a \code{sig_spot_index}
+entry from \code{\link{blisaPathway}}. When supplied, \code{index}/
+\code{ligand}/\code{receptor}/\code{p_cutoff} are ignored and every bin is
+drawn as grey background with these spots coloured. Default \code{NULL}.}
+
+\item{spot_pval}{Numeric vector. P-values for \code{spots} (same length and
+order); required when \code{spots} is supplied.}
+
+\item{title}{Character or \code{NULL}. Plot title. Defaults to the LR pair id
+(or "hotspots" in \code{spots} mode). Useful to label a pathway, e.g.
+\code{title = "MDK pathway"}.}
 }
 \value{
 A \code{ggplot} object.

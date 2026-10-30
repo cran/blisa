@@ -1,4 +1,4 @@
-#' Run BLISA spatial cell-cell communication analysis
+﻿#' Run BLISA spatial cell-cell communication analysis
 #'
 #' Generic function for running BLISA (Bivariate Local Indicator of Spatial
 #' Association). Dispatches on the class of \code{x}:
@@ -57,9 +57,13 @@ blisa <- function(x, ...) UseMethod("blisa")
 #' @param min_ligand Numeric. Minimum ligand count threshold. Default \code{10}.
 #' @param min_receptor Numeric. Minimum receptor count threshold.
 #'   Default \code{10}.
-#' @param min_cells Integer. Bins with fewer cells are excluded from
-#'   Moran's I and assigned neutral statistics (\emph{p} = 1, LISA = 0).
-#'   Ignored when \code{n_cells_col = NA}. Default \code{1}.
+#' @param min_cells Integer. Minimum number of cells per bin. For a
+#'   \code{SpatialExperiment}, bins below this threshold are dropped during
+#'   binning by \code{\link{hexBinCells}}. For pre-binned input supplied
+#'   directly to \code{blisa.default}, they are dropped from \code{bins},
+#'   \code{x} and \code{counts_by_group} before the spatial weights are built;
+#'   this requires \code{n_cells_col} and is ignored when
+#'   \code{n_cells_col = NA}. Default \code{1}.
 #' @param n_cells_col Character or \code{NA}. Column in \code{bins} holding
 #'   per-bin cell counts used for \code{min_cells} filtering.
 #'   Set to \code{NA} to skip (default).
@@ -140,8 +144,36 @@ blisa.default <- function(
   quiet <- function(expr)
     if (verbose) expr else suppressWarnings(suppressMessages(expr))
 
-  sw             <- quiet(computeSpatialWeights(bins, bin_size, dmax, min_cells,
-                                                n_cells_col))
+  ## ---------------------------
+  ## Drop low-cell bins
+  ## For users who supply their own binned data and want cell-number filtering
+  ## without going through the blisa binning pipeline, where hexBinCells() has
+  ## already applied this filter. 
+  ## ---------------------------
+  if (!is.na(n_cells_col)) {
+    if (!n_cells_col %in% colnames(bins))
+      stop("Column '", n_cells_col, "' not found in bins.")
+
+    keep_bins <- bins[[n_cells_col]] >= min_cells
+
+    if (all(keep_bins)) {
+      msg("No bins below ", min_cells, " cells, subsetting skipped.")
+    } else {
+      if (ncol(x) != nrow(bins))
+        stop("ncol(x) (", ncol(x), ") must match nrow(bins) (", nrow(bins),
+             ") to subset bins.")
+      msg(sum(!keep_bins), " bins dropped (< ", min_cells, " cells, column '",
+          n_cells_col, "').")
+
+      bins <- bins[keep_bins, , drop = FALSE]
+      x    <- x[, keep_bins, drop = FALSE]
+      if (!is.null(counts_by_group))
+        counts_by_group <- lapply(counts_by_group,
+                                  function(m) m[, keep_bins, drop = FALSE])
+    }
+  }
+
+  sw             <- quiet(computeSpatialWeights(bins, bin_size, dmax))
   queen_wt       <- sw$queen_wt
   dist_wt        <- sw$dist_wt
   keep_idx_queen <- sw$keep_idx_queen
@@ -281,12 +313,20 @@ blisa.default <- function(
 
 
 #' @describeIn blisa Method for a cell-level SpatialExperiment object.
-#'   Bins cells into hexagonal tiles via \code{\link{hexBinCells}} then
-#'   delegates to \code{blisa.default}.
+#'   For cell-level platforms (e.g. Xenium) it bins cells into hexagonal tiles
+#'   via \code{\link{hexBinCells}}; for Visium it treats each spot as a bin via
+#'   \code{\link{visiumSpotBins}}. Either way it then delegates to
+#'   \code{blisa.default}. The path is chosen by \code{platform}.
 #'
+#' @param platform Character. \code{"auto"} (default) inspects
+#'   \code{colData(x)}: if \code{array_col}/\code{array_row} are present the
+#'   object is treated as \code{"visium"}, otherwise \code{"xenium"}.
+#'   Set explicitly to override the detection.
 #' @param bin_size Numeric. Width of each hexagonal bin in coordinate units
 #'   (e.g. microns). Passed to \code{\link{hexBinCells}} and
-#'   \code{\link{computeSpatialWeights}}. Default \code{50}.
+#'   \code{\link{computeSpatialWeights}}. Default \code{50}; for the Visium
+#'   path it defaults to \code{100} (spot center-to-center spacing) when left
+#'   unset.
 #' @param group Character. Column name in \code{colData(x)} to use as the
 #'   grouping variable (e.g. cell type) for per-group bin aggregation and
 #'   downstream CCI analysis via \code{\link{runCCI}}. If the column is not
@@ -295,8 +335,6 @@ blisa.default <- function(
 #' @param genes Character vector of gene names to consider when matching
 #'   ligand-receptor pairs. Defaults to \code{rownames(x)} (all genes in the
 #'   \code{SpatialExperiment} object).
-#' @param min_cells Integer. Bins with fewer cells are dropped during binning
-#'   by \code{\link{hexBinCells}}. Default \code{1}.
 #' @param min_total_counts Numeric. Bins whose total counts (summed over all
 #'   genes) fall below this threshold are dropped during binning by
 #'   \code{\link{hexBinCells}}. Set to \code{0} to disable. Default \code{10}.
@@ -307,11 +345,53 @@ blisa.default <- function(
 blisa.SpatialExperiment <- function(x, bin_size = 50, LR_df = NULL,
                                        group = "cell_type", genes = NULL,
                                        min_cells = 1, min_total_counts = 10,
+                                       platform = c("auto", "xenium", "visium"),
                                        verbose = FALSE, ...) {
+  platform  <- match.arg(platform)
+  cd_cols   <- colnames(SummarizedExperiment::colData(x))
+  has_array <- all(c("array_col", "array_row") %in% cd_cols)
+
+  if (platform == "auto") {
+    platform <- if (has_array) "visium" else "xenium"
+    if (verbose) message("platform auto-detected as '", platform, "'.")
+  }
+  if (platform == "visium" && !has_array && verbose)
+    message("platform = 'visium' but no array_col/array_row in colData; ",
+            "spatialCoords will be used directly (no de-tilt) \u2014 ensure ",
+            "bin_size matches the coordinate units.")
+
+  ## ---- Visium: each spot is already a bin ------------------------------
+  if (platform == "visium") {
+    if (!is.null(group) && group %in% cd_cols && verbose)
+      message("Visium spots have no per-cell labels \u2014 group '", group,
+              "' ignored; CCI analysis skipped.")
+
+    # bin_size unset -> let visiumSpotBins pick it (100 um for the array-index
+    # lattice, or measured from the coordinates in the fallback).
+    sp <- if (missing(bin_size)) NULL else bin_size
+    binned <- visiumSpotBins(x,
+                             spot_pitch       = sp,
+                             min_total_counts = min_total_counts,
+                             verbose          = verbose)
+
+    # Scale dmax to the coordinate units unless the caller supplied one.
+    dots <- list(...)
+    if (is.null(dots$dmax)) dots$dmax <- 2.5 * binned$pitch
+
+    return(do.call(blisa.default, c(list(
+      x        = binned$counts_matrix,
+      bins     = binned$bins,
+      LR_df    = LR_df,
+      bin_size = binned$pitch,
+      genes    = if (is.null(genes)) rownames(x) else genes,
+      verbose  = verbose
+    ), dots)))
+  }
+
+  ## ---- Xenium (cell-level): bin cells into hexes -----------------------
   coords <- as.data.frame(SpatialExperiment::spatialCoords(x))
 
   # Resolve group vector from colData
-  cd_cols <- colnames(SummarizedExperiment::colData(x))
   if (!is.null(group) && group %in% cd_cols) {
     group_vec <- SummarizedExperiment::colData(x)[[group]]
   } else {

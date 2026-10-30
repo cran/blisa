@@ -1,7 +1,7 @@
 Package: blisa
 Type: Package
 Title: Infer Cell-Cell Communication from Spatial Transcriptomics
-Version: 1.0.0
+Version: 1.0.3
 Authors@R: c(
     person(given = "Yunshun", family = "Chen",
            role = c("aut", "cre"),
@@ -24,14 +24,15 @@ Encoding: UTF-8
 Imports: sf, spdep, fastLISA, Matrix, SpatialExperiment,
         SummarizedExperiment, ComplexHeatmap, ggplot2, viridisLite,
         grid
-RoxygenNote: 7.3.3
 VignetteBuilder: knitr
 Suggests: knitr, rmarkdown
+Config/roxygen2/version: 8.0.0
+RoxygenNote: 7.3.3
 NeedsCompilation: no
-Packaged: 2026-07-10 00:29:21 UTC; yuchen
+Packaged: 2026-10-30 01:08:16 UTC; yuchen
 Author: Yunshun Chen [aut, cre],
   Lei Qin [aut],
   Lizhong Chen [aut]
 Maintainer: Yunshun Chen <yuchen@wehi.edu.au>
 Repository: CRAN
-Date/Publication: 2026-07-10 05:40:02 UTC
+Date/Publication: 2026-10-30 03:40:02 UTC
